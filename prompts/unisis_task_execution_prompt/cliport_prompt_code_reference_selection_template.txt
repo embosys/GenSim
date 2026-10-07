@@ -1,0 +1,12 @@
+Select up to two task-code files that are useful only for GenSim Task class
+style, oracle, or `add_goal` conventions. Treat their scene-construction code
+as irrelevant: this task uses an already-loaded UniSis scene and must not add
+or mutate scene entities. If none is useful, return an empty list.
+
+Task name: TASK_NAME_TEMPLATE
+Available task-code filenames: TASK_CODE_LIST_TEMPLATE
+Fixed-scene task metadata: TASK_STRING_TEMPLATE
+
+Return exactly one Python assignment, with filenames copied from the available
+list:
+code_reference = ["filename.py"]

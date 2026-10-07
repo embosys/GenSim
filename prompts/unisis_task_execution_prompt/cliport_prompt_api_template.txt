@@ -1,0 +1,20 @@
+Review the task and the supported fixed-scene task adapter before code is
+generated.
+
+Task metadata:
+TASK_STRING_TEMPLATE
+
+The only supported task schema in this pipeline is a single move task with
+`target_id` and a three-value `goal_point`. The scene is already loaded by the
+environment. Generated code must subclass
+`cliport.tasks.unisis_task.ExistingSceneTask`, call `super().reset(env)`, and
+bind the YAML target and point through `self.add_scene_goal(...)`. That helper
+checks the arguments against the original YAML and creates the GenSim pose goal.
+Do not add, remove, reposition, recolor, or otherwise mutate scene entities.
+Entity positions and goal_point use world XYZ. The compact scene-entities
+catalog has rotations normalized to PyBullet XYZW; raw YAML may use WXYZ
+quaternions or Euler angles.
+
+Confirm the task can use the existing GenSim oracle/reward API and state any
+adapter constraint the code prompt must respect. Do not propose a new scene or
+change `target_id` or `goal_point`.

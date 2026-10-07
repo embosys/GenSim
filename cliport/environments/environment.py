@@ -16,6 +16,7 @@ import pybullet as p
 import tempfile
 import random
 import sys
+from pathlib import Path
 
 PLACE_STEP = 0.0003
 PLACE_DELTA_THRESHOLD = 0.005
@@ -34,7 +35,10 @@ class Environment(gym.Env):
                  disp=False,
                  shared_memory=False,
                  hz=240,
-                 record_cfg=None):
+                 record_cfg=None,
+                 scene_path=None,
+                 end_effector='suction',
+                 cache_dir=None):
         """Creates OpenAI Gym-style environment with PyBullet.
 
         Args:
@@ -54,11 +58,28 @@ class Environment(gym.Env):
 
         self.homej = np.array([-1, -0.5, 0.5, -0.5, -0.5, 0]) * np.pi
         self.agent_cams = cameras.RealSenseD415.CONFIG
+        self.oracle_cams = cameras.Oracle.CONFIG
         self.record_cfg = record_cfg
         self.save_video = False
         self.step_counter = 0
 
         self.assets_root = assets_root
+        self.scene_path = Path(scene_path).expanduser().resolve() if scene_path else None
+        self.end_effector = end_effector
+        self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir else (
+            Path(__file__).resolve().parents[2] / '.cache' / 'unisis'
+        )
+        self.document = None
+        self.scene_task = None
+        self.loaded_scene = None
+        self.entity_id_to_body_id = {}
+        self.body_id_to_entity_id = {}
+        self.scene_warnings = []
+        if self.scene_path is not None:
+            from cliport.environments.unisis_scene_loader import parse_scene_yaml
+
+            self.document = parse_scene_yaml(self.scene_path)
+            self.scene_task = self.document.task or self.document.raw.get('metadata')
 
         color_tuple = [
             gym.spaces.Box(0, 255, config['image_size'] + (3,), dtype=np.uint8)
@@ -97,6 +118,7 @@ class Environment(gym.Env):
             if shared_memory:
                 disp_option = p.SHARED_MEMORY
         client = p.connect(disp_option)
+        self.client_id = client
         file_io = p.loadPlugin('fileIOPlugin', physicsClientId=client)
         if file_io < 0:
             raise RuntimeError('pybullet: cannot load FileIO!')
@@ -124,6 +146,403 @@ class Environment(gym.Env):
 
         if task:
             self.set_task(task)
+
+    def _scene_body_aabb(self, body_id):
+        """Return a finite world-space AABB spanning every link of a body."""
+        bounds = []
+        for link_index in range(-1, p.getNumJoints(body_id, physicsClientId=self.client_id)):
+            try:
+                lower, upper = p.getAABB(
+                    body_id, link_index, physicsClientId=self.client_id
+                )
+            except p.error:
+                continue
+            lower = np.asarray(lower, dtype=np.float64)
+            upper = np.asarray(upper, dtype=np.float64)
+            extent = upper - lower
+            if (np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
+                    and np.all(extent >= 0) and np.all(extent < 100)):
+                bounds.append((lower, upper))
+        if not bounds:
+            return None
+        return np.min([item[0] for item in bounds], axis=0), np.max(
+            [item[1] for item in bounds], axis=0
+        )
+
+    @staticmethod
+    def _quaternion_from_rotation_matrix(rotation):
+        """Convert a 3x3 rotation matrix to a PyBullet XYZW quaternion."""
+        matrix = np.asarray(rotation, dtype=np.float64)
+        trace = float(np.trace(matrix))
+        if trace > 0:
+            scale = np.sqrt(trace + 1.0) * 2.0
+            quaternion = np.array([
+                (matrix[2, 1] - matrix[1, 2]) / scale,
+                (matrix[0, 2] - matrix[2, 0]) / scale,
+                (matrix[1, 0] - matrix[0, 1]) / scale,
+                0.25 * scale,
+            ])
+        elif matrix[0, 0] > matrix[1, 1] and matrix[0, 0] > matrix[2, 2]:
+            scale = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+            quaternion = np.array([
+                0.25 * scale,
+                (matrix[0, 1] + matrix[1, 0]) / scale,
+                (matrix[0, 2] + matrix[2, 0]) / scale,
+                (matrix[2, 1] - matrix[1, 2]) / scale,
+            ])
+        elif matrix[1, 1] > matrix[2, 2]:
+            scale = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+            quaternion = np.array([
+                (matrix[0, 1] + matrix[1, 0]) / scale,
+                0.25 * scale,
+                (matrix[1, 2] + matrix[2, 1]) / scale,
+                (matrix[0, 2] - matrix[2, 0]) / scale,
+            ])
+        else:
+            scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+            quaternion = np.array([
+                (matrix[0, 2] + matrix[2, 0]) / scale,
+                (matrix[1, 2] + matrix[2, 1]) / scale,
+                0.25 * scale,
+                (matrix[1, 0] - matrix[0, 1]) / scale,
+            ])
+        quaternion /= np.linalg.norm(quaternion)
+        return tuple(float(value) for value in quaternion)
+
+    @classmethod
+    def _look_at_config(cls, position, target, *, image_size=(480, 640), focal=450.0,
+                        zrange=(0.01, 10.0)):
+        """Build a camera config using the render_camera local +Z view convention."""
+        position = np.asarray(position, dtype=np.float64)
+        target = np.asarray(target, dtype=np.float64)
+        forward = target - position
+        forward /= np.linalg.norm(forward)
+        up_hint = np.array([0.0, 0.0, 1.0])
+        if abs(float(np.dot(forward, up_hint))) > 0.98:
+            up_hint = np.array([0.0, 1.0, 0.0])
+        up = up_hint - np.dot(up_hint, forward) * forward
+        up /= np.linalg.norm(up)
+        right = np.cross(forward, up)
+        right /= np.linalg.norm(right)
+        rotation = np.column_stack((right, -up, forward))
+        height, width = image_size
+        intrinsics = (
+            focal, 0.0, width / 2.0,
+            0.0, focal, height / 2.0,
+            0.0, 0.0, 1.0,
+        )
+        return {
+            'image_size': image_size,
+            'intrinsics': intrinsics,
+            'position': tuple(float(value) for value in position),
+            'rotation': cls._quaternion_from_rotation_matrix(rotation),
+            'zrange': zrange,
+            'noise': False,
+        }
+
+    def _configure_scene_workspace(self):
+        """Frame the declared manipulation target, support surface, and goal."""
+        task = self.scene_task if isinstance(self.scene_task, dict) else {}
+        target_id = task.get('target_id')
+        raw_surface = next((
+            task[key] for key in (
+                'surface_id', 'support_surface_id', 'goal_surface_id', 'surface'
+            ) if task.get(key) is not None
+        ), None)
+        surface_refs = []
+        surface_points = []
+        if isinstance(raw_surface, dict):
+            surface_ref = next((raw_surface[key] for key in (
+                'entity_id', 'id', 'name'
+            ) if raw_surface.get(key) is not None), None)
+            if surface_ref is not None:
+                surface_refs.append(str(surface_ref))
+            position = raw_surface.get('position', raw_surface.get('center'))
+            if isinstance(position, (list, tuple)) and len(position) == 3:
+                surface_points.append(np.asarray(position, dtype=np.float64))
+        elif isinstance(raw_surface, (list, tuple)):
+            if len(raw_surface) == 3 and all(
+                isinstance(value, (int, float)) for value in raw_surface
+            ):
+                surface_points.append(np.asarray(raw_surface, dtype=np.float64))
+            else:
+                surface_refs.extend(str(value) for value in raw_surface)
+        elif raw_surface is not None:
+            surface_refs.append(str(raw_surface))
+
+        def _body_bounds_for_reference(reference):
+            canonical_id = self.document.name_to_entity_id.get(
+                str(reference), str(reference)
+            )
+            body_id = self.entity_id_to_body_id.get(canonical_id)
+            if body_id is None:
+                return None
+            return self._scene_body_aabb(body_id)
+
+        target_bounds = _body_bounds_for_reference(target_id) if target_id is not None else None
+        surface_bounds = [
+            bounds for reference in surface_refs
+            if (bounds := _body_bounds_for_reference(reference)) is not None
+        ]
+        goal_point = task.get('goal_point')
+        if isinstance(goal_point, (list, tuple)) and len(goal_point) == 3:
+            goal_point = np.asarray(goal_point, dtype=np.float64)
+            if not np.all(np.isfinite(goal_point)):
+                goal_point = None
+        else:
+            goal_point = None
+
+        xy_anchors = []
+        z_lows = []
+        z_highs = []
+        if target_bounds is not None:
+            target_lower, target_upper = target_bounds
+            xy_anchors.extend((target_lower[:2], target_upper[:2]))
+            z_lows.append(float(target_lower[2]))
+            z_highs.append(float(target_upper[2]))
+        if goal_point is not None:
+            xy_anchors.append(goal_point[:2])
+            z_lows.append(float(goal_point[2]))
+            z_highs.append(float(goal_point[2]))
+        xy_anchors.extend(point[:2] for point in surface_points)
+        z_lows.extend(float(point[2]) for point in surface_points)
+        z_highs.extend(float(point[2]) for point in surface_points)
+
+        # Include only the local patch of a declared support surface around the
+        # target/goal. This avoids framing unrelated room geometry such as rugs
+        # and sofas while keeping the actual placement region visible.
+        if xy_anchors:
+            anchor_lower = np.min(xy_anchors, axis=0)
+            anchor_upper = np.max(xy_anchors, axis=0)
+            for surface_lower, surface_upper in surface_bounds:
+                patch_lower = np.maximum(surface_lower[:2], anchor_lower - 0.2)
+                patch_upper = np.minimum(surface_upper[:2], anchor_upper + 0.2)
+                if np.all(patch_lower <= patch_upper):
+                    xy_anchors.extend((patch_lower, patch_upper))
+                # A support surface's top is the relevant vertical anchor;
+                # its legs/base would otherwise pull the map down to the floor.
+                z_lows.append(float(surface_upper[2]) - 0.1)
+                z_highs.append(float(surface_upper[2]))
+            anchor_lower = np.min(xy_anchors, axis=0)
+            anchor_upper = np.max(xy_anchors, axis=0)
+        else:
+            # Scenes without the fixed-target schema get a compact workspace
+            # around the robot instead of aggregating nearby room furniture.
+            robot_config = self.loaded_scene.entity_configs[self.scene_robot_entity_id]
+            robot_position = np.asarray(robot_config['position'], dtype=np.float64)
+            anchor_lower = robot_position[:2] - 0.25
+            anchor_upper = robot_position[:2] + 0.25
+            z_lows.append(max(0.0, float(robot_position[2])))
+            z_highs.append(float(robot_position[2]) + 0.25)
+            if surface_bounds:
+                nearest_surface = min(
+                    surface_bounds,
+                    key=lambda bounds: float(np.linalg.norm(
+                        np.clip(robot_position[:2], bounds[0][:2], bounds[1][:2])
+                        - robot_position[:2]
+                    )),
+                )
+                surface_lower, surface_upper = nearest_surface
+                anchor_lower = np.maximum(anchor_lower, surface_lower[:2])
+                anchor_upper = np.minimum(anchor_upper, surface_upper[:2])
+                z_lows.append(float(surface_upper[2]) - 0.1)
+                z_highs.append(float(surface_upper[2]))
+
+        margin = 0.2
+        xy_lower = anchor_lower - margin
+        xy_upper = anchor_upper + margin
+        for axis in range(2):
+            if xy_upper[axis] - xy_lower[axis] < 0.5:
+                center = (xy_lower[axis] + xy_upper[axis]) / 2.0
+                xy_lower[axis] = center - 0.25
+                xy_upper[axis] = center + 0.25
+
+        if not z_lows:
+            z_lows.append(0.0)
+        if not z_highs:
+            z_highs.append(0.25)
+        z_lower = max(0.0, min(z_lows) - 0.05)
+        z_upper = max(z_highs) + 0.55
+        if z_upper <= z_lower + 0.3:
+            z_upper = z_lower + 0.6
+        self.bounds = np.array([
+            [xy_lower[0], xy_upper[0]],
+            [xy_lower[1], xy_upper[1]],
+            [z_lower, z_upper],
+        ], dtype=np.float64)
+        self.position_bounds = gym.spaces.Box(
+            low=self.bounds[:, 0].astype(np.float32),
+            high=self.bounds[:, 1].astype(np.float32),
+            shape=(3,), dtype=np.float32,
+        )
+        self.action_space = gym.spaces.Dict({
+            'pose0': gym.spaces.Tuple((
+                self.position_bounds,
+                gym.spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+            )),
+            'pose1': gym.spaces.Tuple((
+                self.position_bounds,
+                gym.spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32),
+            )),
+        })
+
+        center_xy = (xy_lower + xy_upper) / 2.0
+        center_z = (z_lower + z_upper) / 2.0
+        span_x = float(xy_upper[0] - xy_lower[0])
+        span_y = float(xy_upper[1] - xy_lower[1])
+        camera_height = max(z_upper + 1.5, center_z + 2.0)
+        camera_distance = camera_height - center_z
+        image_size = cameras.Oracle.CONFIG[0]['image_size']
+        image_height, image_width = image_size
+        focal = min(
+            image_height * camera_distance / max(span_x, 1e-3),
+            image_width * camera_distance / max(span_y, 1e-3),
+        ) * 0.95
+        oracle_camera = dict(cameras.Oracle.CONFIG[0])
+        oracle_camera.update({
+            'position': (float(center_xy[0]), float(center_xy[1]), camera_height),
+            'intrinsics': (
+                focal, 0.0, image_width / 2.0,
+                0.0, focal, image_height / 2.0,
+                0.0, 0.0, 1.0,
+            ),
+            'zrange': (0.01, camera_height - z_lower + 0.1),
+            'noise': False,
+        })
+        self.oracle_cams = [oracle_camera]
+
+        radius = max(0.8, 0.85 * max(span_x, span_y))
+        eye_height = max(0.7, 0.75 * radius)
+        target = np.array([center_xy[0], center_xy[1], center_z])
+        camera_targets = [
+            center_xy + np.array([radius, 0.0]),
+            center_xy + np.array([-0.5 * radius, radius * 0.87]),
+            center_xy + np.array([-0.5 * radius, -radius * 0.87]),
+        ]
+        self.agent_cams = []
+        for xy in camera_targets:
+            eye = np.array([xy[0], xy[1], center_z + eye_height])
+            self.agent_cams.append(self._look_at_config(
+                eye, target, zrange=(0.01, max(4.0, camera_height - z_lower + 1.0))
+            ))
+        color_tuple = [
+            gym.spaces.Box(0, 255, config['image_size'] + (3,), dtype=np.uint8)
+            for config in self.agent_cams
+        ]
+        depth_tuple = [
+            gym.spaces.Box(0.0, 20.0, config['image_size'], dtype=np.float32)
+            for config in self.agent_cams
+        ]
+        self.observation_space = gym.spaces.Dict({
+            'color': gym.spaces.Tuple(color_tuple),
+            'depth': gym.spaces.Tuple(depth_tuple),
+        })
+
+    def _reset_scene(self):
+        """Reload a UniSis scene in this environment's existing PyBullet client."""
+        from cliport.environments.unisis_scene_loader import load_scene_entities
+        from cliport.environments.robot_adapters import create_robot_adapter
+
+        if self.end_effector != 'suction':
+            raise ValueError(
+                f"UniSis GenSim integration currently supports end_effector='suction'; "
+                f"got {self.end_effector!r}."
+            )
+        self.obj_ids = {'fixed': [], 'rigid': [], 'deformable': []}
+        self.objects = self.obj_ids
+        p.configureDebugVisualizer(
+            p.COV_ENABLE_RENDERING, 0, physicsClientId=self.client_id
+        )
+        try:
+            p.resetSimulation(
+                flags=p.RESET_USE_DEFORMABLE_WORLD, physicsClientId=self.client_id
+            )
+            sim_options = self.document.sim_options
+            gravity = sim_options.get('gravity', (0.0, 0.0, -9.81))
+            if isinstance(gravity, dict):
+                gravity = [gravity.get(axis, default) for axis, default in zip(
+                    ('x', 'y', 'z'), (0.0, 0.0, -9.81)
+                )]
+            p.setGravity(*[float(value) for value in gravity], physicsClientId=self.client_id)
+            time_step = next((sim_options[key] for key in
+                              ('time_step', 'timestep', 'dt', 'physics_timestep')
+                              if sim_options.get(key) is not None), 1.0 / 240.0)
+            p.setTimeStep(float(time_step), physicsClientId=self.client_id)
+            p.setPhysicsEngineParameter(
+                enableFileCaching=0, physicsClientId=self.client_id
+            )
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self.loaded_scene = load_scene_entities(
+                self.document,
+                physics_client_id=self.client_id,
+                cache_dir=self.cache_dir,
+            )
+            self.obj_ids = self.loaded_scene.obj_ids
+            self.objects = self.obj_ids
+            self.entity_id_to_body_id = dict(self.loaded_scene.entity_id_to_body_id)
+            self.body_id_to_entity_id = dict(self.loaded_scene.body_id_to_entity_id)
+            self.scene_warnings = list(self.loaded_scene.warnings)
+
+            if len(self.loaded_scene.robot_ids) != 1:
+                raise ValueError(
+                    'UniSis GenSim integration requires exactly one Franka Panda robot; '
+                    f"scene has {len(self.loaded_scene.robot_ids)} robot entities."
+                )
+            self.scene_robot_entity_id = self.loaded_scene.robot_ids[0]
+            robot_config = self.loaded_scene.entity_configs[self.scene_robot_entity_id]
+            robot_type = str(robot_config.get('robot_adapter', '')).strip().lower()
+            if not robot_type:
+                identity = ' '.join((
+                    self.scene_robot_entity_id,
+                    str(robot_config.get('file', '')),
+                )).lower()
+                if 'franka' in identity or 'panda' in identity:
+                    robot_type = 'franka'
+            if robot_type not in {
+                'franka', 'franka_panda', 'franka_emika_panda', 'panda'
+            }:
+                raise ValueError(
+                    'Only Franka Panda scenes are supported by the GenSim environment; '
+                    f"robot entity {self.scene_robot_entity_id!r} declares "
+                    f"robot_adapter={robot_type or '<missing>'!r}."
+                )
+            adapter_options = robot_config.get('robot_adapter_kwargs') or {}
+            default_qpos = adapter_options.get('default_qpos') if isinstance(
+                adapter_options, dict
+            ) else None
+            if default_qpos is not None:
+                default_qpos = [float(value) for value in default_qpos]
+                if len(default_qpos) not in (7, 9):
+                    raise ValueError(
+                        f"Robot {self.scene_robot_entity_id!r} default_qpos must contain "
+                        '7 arm values or 9 arm-and-finger values.'
+                    )
+            self.robot_adapter = create_robot_adapter(
+                self.entity_id_to_body_id[self.scene_robot_entity_id],
+                self.obj_ids,
+                self.assets_root,
+                robot_type=robot_type,
+                end_effector=self.end_effector,
+                default_qpos=default_qpos,
+            )
+            self.ur5 = self.robot_adapter.robot_id
+            self.joints = list(self.robot_adapter.joints)
+            self.homej = np.asarray(self.robot_adapter.homej, dtype=np.float32)
+            self.ee = self.robot_adapter.ee
+            self.ee_tip = self.robot_adapter.ee_tip
+            self._configure_scene_workspace()
+            p.configureDebugVisualizer(
+                p.COV_ENABLE_GUI, 0, physicsClientId=self.client_id
+            )
+            self.ee.release()
+            self.task.reset(self)
+        finally:
+            p.configureDebugVisualizer(
+                p.COV_ENABLE_RENDERING, 1, physicsClientId=self.client_id
+            )
+
+        obs, _, _, _ = self.step()
+        return obs
 
     def __del__(self):
         if hasattr(self, 'video_writer'):
@@ -236,6 +655,8 @@ class Environment(gym.Env):
         if not self.task:
             raise ValueError('environment task must be set. Call set_task or pass '
                              'the task arg in the environment constructor.')
+        if self.scene_path is not None:
+            return self._reset_scene()
         self.obj_ids = {'fixed': [], 'rigid': [], 'deformable': []}
         p.resetSimulation(p.RESET_USE_DEFORMABLE_WORLD)
         p.setGravity(0, 0, -9.8)
@@ -395,7 +816,15 @@ class Environment(gym.Env):
             depth += self._random.normal(0, 0.003, depth_image_size)
 
         # Get segmentation image.
-        segm = np.uint8(segm).reshape(depth_image_size)
+        if self.scene_path is not None:
+            # PyBullet packs the link index into the high byte. Keep body IDs in
+            # int32 and strip those link bits so task masks compare to body IDs.
+            packed_segm = np.asarray(segm, dtype=np.int32).reshape(depth_image_size)
+            segm = np.where(
+                packed_segm < 0, -1, packed_segm & ((1 << 24) - 1)
+            ).astype(np.int32, copy=False)
+        else:
+            segm = np.uint8(segm).reshape(depth_image_size)
 
         return color, depth, segm
 
@@ -413,7 +842,13 @@ class Environment(gym.Env):
         for obj_ids in self.obj_ids.values():
             for obj_id in obj_ids:
                 pos, rot = p.getBasePositionAndOrientation(obj_id)
-                dim = p.getVisualShapeData(obj_id)[0][3]
+                if self.scene_path is not None:
+                    body_bounds = self._scene_body_aabb(obj_id)
+                    if body_bounds is None:
+                        continue
+                    dim = tuple(body_bounds[1] - body_bounds[0])
+                else:
+                    dim = p.getVisualShapeData(obj_id)[0][3]
                 info[obj_id] = (pos, rot, dim)
 
         info['lang_goal'] = self.get_lang_goal()
@@ -437,7 +872,9 @@ class Environment(gym.Env):
     # ---------------------------------------------------------------------------
 
     def movej(self, targj, speed=0.01, timeout=5):
-        """Move UR5 to target joint configuration."""
+        """Move the robot; scene mode budgets simulated time, not wall time."""
+        if self.scene_path is not None:
+            return self._movej_scene(targj, speed, timeout)
         if self.save_video:
             timeout = timeout * 30 # 50?
 
@@ -464,6 +901,40 @@ class Environment(gym.Env):
             self.step_simulation()
 
         print(f'Warning: movej exceeded {timeout} second timeout. Skipping.')
+        return True
+
+    def _movej_scene(self, targj, speed, timeout):
+        """Bound motion by physics steps so large meshes cannot expire it early."""
+        target = np.asarray(targj, dtype=np.float64)
+        if target.shape != (len(self.joints),) or not np.all(np.isfinite(target)):
+            raise ValueError("Scene joint target must contain seven finite arm values.")
+        if not np.isfinite(speed) or speed <= 0 or not np.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Scene motion speed and timeout must be positive and finite.")
+        time_step = p.getPhysicsEngineParameters(
+            physicsClientId=self.client_id
+        )['fixedTimeStep']
+        max_steps = max(1, int(np.ceil(timeout / time_step)))
+        for _ in range(max_steps):
+            current = np.asarray([
+                p.getJointState(self.robot_adapter.robot_id, joint,
+                                physicsClientId=self.client_id)[0]
+                for joint in self.joints
+            ])
+            difference = target - current
+            if np.all(np.abs(difference) < 1e-2):
+                return False
+            distance = np.linalg.norm(difference)
+            command = current + difference / distance * min(speed, distance)
+            p.setJointMotorControlArray(
+                self.robot_adapter.robot_id,
+                self.joints,
+                p.POSITION_CONTROL,
+                targetPositions=command,
+                positionGains=np.ones(len(self.joints)),
+                physicsClientId=self.client_id,
+            )
+            self.step_simulation()
+        print(f'Warning: scene movej exceeded {max_steps} physics steps. Skipping.')
         return True
 
     def start_rec(self, video_filename):
@@ -565,6 +1036,8 @@ class Environment(gym.Env):
 
     def solve_ik(self, pose):
         """Calculate joint configuration with inverse kinematics."""
+        if self.scene_path is not None:
+            return np.asarray(self.robot_adapter.solve_ik(pose), dtype=np.float32)
         joints = p.calculateInverseKinematics(
             bodyUniqueId=self.ur5,
             endEffectorLinkIndex=self.ee_tip,
@@ -579,6 +1052,17 @@ class Environment(gym.Env):
         joints = np.float32(joints)
         joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints
+
+    def get_scene_object(self, entity_id):
+        """Resolve a UniSis entity ID or name to its current PyBullet body ID."""
+        if self.loaded_scene is None:
+            raise RuntimeError('The UniSis scene has not been reset yet.')
+        entity_id = str(entity_id)
+        canonical_id = self.document.name_to_entity_id.get(entity_id, entity_id)
+        try:
+            return self.entity_id_to_body_id[canonical_id]
+        except KeyError as exc:
+            raise KeyError(f'No loaded UniSis entity has id or name {entity_id!r}.') from exc
 
     def _get_obs(self):
         # Get RGB-D camera image observations.

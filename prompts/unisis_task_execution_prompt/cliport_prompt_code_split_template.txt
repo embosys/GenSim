@@ -1,0 +1,48 @@
+Write a GenSim task class for the fixed UniSis scene below. Use the supplied
+reference code only to understand the existing Task API; do not copy its scene
+construction, randomization, or object-mutation behavior.
+
+Task name: TASK_NAME_TEMPLATE
+Task and scene data:
+TASK_STRING_TEMPLATE
+
+Entity positions and `goal_point` use world XYZ. Rotations shown in the compact
+`scene-entities` catalog are normalized to PyBullet XYZW; raw YAML may use WXYZ
+quaternions or Euler angles. Do not convert or substitute the YAML goal point.
+
+Relevant GenSim task references:
+TASK_CODE_REFERENCE_TEMPLATE
+
+Requirements:
+- Return one Python code block defining exactly one class that inherits from
+  `ExistingSceneTask` imported from `cliport.tasks.unisis_task`.
+- Use a valid PascalCase Python class name based on the task name.
+- In `reset(self, env)`, call `super().reset(env)` and then call
+  `self.add_scene_goal(target_id=self.scene_task["target_id"],
+  goal_point=self.scene_task["goal_point"])` exactly once.
+- Do not change, round, recompute, or replace the YAML target ID or goal point.
+  The adapter validates both values against the loaded YAML.
+- The supported schema is one existing object moved to one fixed point. Do not
+  create objects, fixtures, markers, assets, or additional goals. Do not call
+  `env.add_object`, `self.add_goal`, PyBullet creation/loading functions, or any
+  method that changes a scene body's pose, color, or dynamics.
+- Keep the class concise. The fixed-scene adapter supplies the workspace,
+  camera, pixel size, entity-to-body mapping, oracle, and reward machinery.
+
+Example shape (use the actual task's class name):
+```python
+from cliport.tasks.unisis_task import ExistingSceneTask
+
+
+class MoveSceneObject(ExistingSceneTask):
+    def __init__(self):
+        super().__init__()
+        self.max_steps = 1
+
+    def reset(self, env):
+        super().reset(env)
+        self.add_scene_goal(
+            target_id=self.scene_task["target_id"],
+            goal_point=self.scene_task["goal_point"],
+        )
+```

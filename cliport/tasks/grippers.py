@@ -61,7 +61,15 @@ class Spatula(Gripper):
 class Suction(Gripper):
     """Simulate simple suction dynamics."""
 
-    def __init__(self, assets_root, robot, ee, obj_ids):
+    def __init__(
+            self,
+            assets_root,
+            robot,
+            ee,
+            obj_ids,
+            *,
+            base_mount_transform=None,
+            head_mount_transform=None):
         """Creates suction and 'attaches' it to the robot.
     
         Has special cases when dealing with rigid vs deformables. For rigid,
@@ -89,38 +97,47 @@ class Suction(Gripper):
         super().__init__(assets_root)
 
         # Load suction gripper base model (visual only).
-        pose = ((0.487, 0.109, 0.438), p.getQuaternionFromEuler((np.pi, 0, 0)))
         self.base_urdf_path = os.path.join(self.assets_root, SUCTION_BASE_URDF)
-
-        base = pybullet_utils.load_urdf(
-            p, self.base_urdf_path, pose[0], pose[1])
-        self.base = base
-        p.createConstraint(
-            parentBodyUniqueId=robot,
-            parentLinkIndex=ee,
-            childBodyUniqueId=base,
-            childLinkIndex=-1,
-            jointType=p.JOINT_FIXED,
-            jointAxis=(0, 0, 0),
-            parentFramePosition=(0, 0, 0),
-            childFramePosition=(0, 0, 0.01))
+        if base_mount_transform is None:
+            # Preserve the original UR5 mount and placement behavior.
+            pose = ((0.487, 0.109, 0.438), p.getQuaternionFromEuler((np.pi, 0, 0)))
+            base = pybullet_utils.load_urdf(
+                p, self.base_urdf_path, pose[0], pose[1])
+            self.base = base
+            p.createConstraint(
+                parentBodyUniqueId=robot,
+                parentLinkIndex=ee,
+                childBodyUniqueId=base,
+                childLinkIndex=-1,
+                jointType=p.JOINT_FIXED,
+                jointAxis=(0, 0, 0),
+                parentFramePosition=(0, 0, 0),
+                childFramePosition=(0, 0, 0.01))
+        else:
+            self.base, self.base_mount_constraint = _load_mounted_urdf(
+                self.base_urdf_path, robot, ee, base_mount_transform)
 
         # Load suction tip model (visual and collision) with compliance.
-        # urdf = 'assets/ur5/suction/suction-head.urdf'
-        pose = ((0.487, 0.109, 0.347), p.getQuaternionFromEuler((np.pi, 0, 0)))
         self.urdf_path = os.path.join(self.assets_root, SUCTION_HEAD_URDF)
-        self.body = pybullet_utils.load_urdf(
-            p, self.urdf_path, pose[0], pose[1])
-        constraint_id = p.createConstraint(
-            parentBodyUniqueId=robot,
-            parentLinkIndex=ee,
-            childBodyUniqueId=self.body,
-            childLinkIndex=-1,
-            jointType=p.JOINT_FIXED,
-            jointAxis=(0, 0, 0),
-            parentFramePosition=(0, 0, 0),
-            childFramePosition=(0, 0, -0.08))
+        if head_mount_transform is None:
+            # Preserve the original UR5 mount and placement behavior.
+            pose = ((0.487, 0.109, 0.347), p.getQuaternionFromEuler((np.pi, 0, 0)))
+            self.body = pybullet_utils.load_urdf(
+                p, self.urdf_path, pose[0], pose[1])
+            constraint_id = p.createConstraint(
+                parentBodyUniqueId=robot,
+                parentLinkIndex=ee,
+                childBodyUniqueId=self.body,
+                childLinkIndex=-1,
+                jointType=p.JOINT_FIXED,
+                jointAxis=(0, 0, 0),
+                parentFramePosition=(0, 0, 0),
+                childFramePosition=(0, 0, -0.08))
+        else:
+            self.body, constraint_id = _load_mounted_urdf(
+                self.urdf_path, robot, ee, head_mount_transform)
         p.changeConstraint(constraint_id, maxForce=100)
+        self.mount_constraint = constraint_id
 
         # Reference to object IDs in environment for simulating suction.
         self.obj_ids = obj_ids
@@ -247,3 +264,33 @@ class Suction(Gripper):
         if self.contact_constraint is not None:
             suctioned_object = p.getConstraintInfo(self.contact_constraint)[2]
         return suctioned_object is not None
+
+
+def _load_mounted_urdf(urdf_path, robot, parent_link, mount_transform):
+    """Load a body at a parent-link-relative pose and fix it in place."""
+    mount_position, mount_orientation = mount_transform
+    parent_state = p.getLinkState(
+        robot, parent_link, computeForwardKinematics=True)
+    world_position, world_orientation = p.multiplyTransforms(
+        parent_state[4], parent_state[5], mount_position, mount_orientation)
+    body = pybullet_utils.load_urdf(
+        p, urdf_path, world_position, world_orientation)
+    child_com_position, child_com_orientation = p.getBasePositionAndOrientation(body)
+    parent_frame_position, parent_frame_orientation = p.multiplyTransforms(
+        *p.invertTransform(parent_state[0], parent_state[1]),
+        parent_state[4], parent_state[5])
+    child_frame_position, child_frame_orientation = p.multiplyTransforms(
+        *p.invertTransform(child_com_position, child_com_orientation),
+        parent_state[4], parent_state[5])
+    constraint = p.createConstraint(
+        parentBodyUniqueId=robot,
+        parentLinkIndex=parent_link,
+        childBodyUniqueId=body,
+        childLinkIndex=-1,
+        jointType=p.JOINT_FIXED,
+        jointAxis=(0, 0, 0),
+        parentFramePosition=parent_frame_position,
+        parentFrameOrientation=parent_frame_orientation,
+        childFramePosition=child_frame_position,
+        childFrameOrientation=child_frame_orientation)
+    return body, constraint

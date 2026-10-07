@@ -13,6 +13,7 @@ import time
 import random
 import json
 import traceback
+import math
 from gensim.utils import (
     mkdir_if_missing,
     save_text,
@@ -39,6 +40,7 @@ class SimulationRunner:
         self.prompt_folder = f"prompts/{cfg['prompt_folder']}"
         self.chat_log = memory.chat_log
         self.task_asset_logs = []
+        self.scene_source = str(cfg.get("scene_source", "original")).lower()
 
         # All the generated tasks in this run.
         # Different from the ones in online buffer that can load from offline.
@@ -56,7 +58,12 @@ class SimulationRunner:
 
     def save_stats(self):
         """ save the final simulation statistics """
-        self.diversity_score = compute_diversity_score_from_assets(self.task_asset_logs, self.curr_trials)
+        if self.scene_source == "unisis":
+            self.diversity_score = 0.0
+        else:
+            self.diversity_score = compute_diversity_score_from_assets(
+                self.task_asset_logs, self.curr_trials
+            )
         save_stat(self.cfg, self.cfg['model_output_dir'], self.generated_tasks, self.syntax_pass_rate / (self.curr_trials),
                 self.runtime_pass_rate / (self.curr_trials), self.env_pass_rate / (self.curr_trials), self.diversity_score)
         print("Model Folder: ", self.cfg['model_output_dir'])
@@ -96,12 +103,24 @@ class SimulationRunner:
 
     def setup_env(self):
         """ build the new task"""
+        env_kwargs = {}
+        if self.scene_source == "unisis":
+            scene_cfg = self.cfg.get("unisis", {})
+            scene_path = scene_cfg.get("scene_path") if hasattr(scene_cfg, "get") else None
+            if not scene_path:
+                raise ValueError("scene_source=unisis requires unisis.scene_path.")
+            env_kwargs.update(
+                scene_path=scene_path,
+                end_effector=scene_cfg.get("end_effector", "suction"),
+                cache_dir=scene_cfg.get("cache_dir"),
+            )
         env = Environment(
                 self.cfg['assets_root'],
                 disp=self.cfg['disp'],
                 shared_memory=self.cfg['shared_memory'],
                 hz=480,
-                record_cfg=self.cfg['record']
+                record_cfg=self.cfg['record'],
+                **env_kwargs,
             )
 
         task = eval(self.curr_task_name)()
@@ -133,6 +152,8 @@ class SimulationRunner:
         print('Oracle demo: {}/{} | Seed: {}'.format(dataset.n_episodes + 1, self.cfg['n'], seed))
         env.set_task(task)
         obs = env.reset()
+        if hasattr(task, "validate_scene_goal"):
+            task.validate_scene_goal()
 
         info = env.info
         reward = 0
@@ -182,6 +203,10 @@ class SimulationRunner:
 
         try:
             # Collect environment and collect data from oracle demonstrations.
+            if self.scene_source == "unisis":
+                self._simulate_unisis_episodes(dataset, expert, env, task)
+                return
+
             while total_cnt <= self.cfg['max_env_run_cnt']:
                 total_cnt += 1
                 # Set seeds.
@@ -220,3 +245,42 @@ class SimulationRunner:
             print("========================================================")
             print("Runtime Exception:", to_print)
         self.memory.save_run(self.generated_task)
+
+    def _simulate_unisis_episodes(self, dataset, expert, env, task):
+        """Run bounded attempts and save only episodes that reached the goal."""
+        max_attempts = max(1, int(self.cfg["max_env_run_cnt"]))
+        success_count = 0
+        try:
+            for attempt in range(max_attempts):
+                episode = []
+                seed = 123 + attempt
+                total_reward = self.run_one_episode(
+                    dataset, expert, env, task, episode, seed
+                )
+                if total_reward > 0.99:
+                    success_count += 1
+                    if self.cfg["save_data"]:
+                        dataset.add(seed, episode)
+
+            self.runtime_pass_rate += 1
+            print("Runtime Test Pass!")
+            if success_count >= math.ceil(max_attempts / 2):
+                self.env_pass_rate += 1
+                print("Environment Test Pass!")
+            else:
+                print(
+                    f"Environment Test Failed: {success_count}/{max_attempts} successful attempts."
+                )
+        except:
+            to_print = highlight(f"{str(traceback.format_exc())}", PythonLexer(), TerminalFormatter())
+            save_text(
+                self.cfg['model_output_dir'],
+                self.generated_task_name + '_error',
+                str(traceback.format_exc()),
+            )
+            print("========================================================")
+            print("Runtime Exception:", to_print)
+        finally:
+            # Fixed-scene tasks are evaluated directly; do not run the old
+            # novelty reflection or add their metadata/code to generic memory.
+            self.memory.save_run(self.generated_task)

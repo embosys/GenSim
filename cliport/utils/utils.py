@@ -44,7 +44,8 @@ def get_heightmap(points, colors, bounds, pixel_size):
     width = int(np.round((bounds[0, 1] - bounds[0, 0]) / pixel_size))
     height = int(np.round((bounds[1, 1] - bounds[1, 0]) / pixel_size))
     heightmap = np.zeros((height, width), dtype=np.float32)
-    colormap = np.zeros((height, width, colors.shape[-1]), dtype=np.uint8)
+    # Preserve integer object IDs when RGB and segmentation share this array.
+    colormap = np.zeros((height, width, colors.shape[-1]), dtype=colors.dtype)
 
     # Filter out 3D points that are outside of the predefined bounds.
     ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] < bounds[0, 1])

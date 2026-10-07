@@ -63,5 +63,48 @@ and backend-specific rigid options are reported when unsupported. Camera
 position/look-at values can guide the preview, but this is not a reproduction
 of UniSis sensor outputs. No additional robot, table, or floor is inserted.
 
-Franka task execution, GenSim task binding, and success checking remain separate
-future integration work.
+## GenSim task execution
+
+The original entry point remains `gensim/run_simulation.py`. The default
+`scene_source=original` retains the original task-design and UR5 workflow.
+To execute a fixed UniSis scene and its task instead:
+
+```bash
+export GENSIM_ROOT="$PWD"
+# Set OPENAI_KEY through your shell/environment before running.
+uv run --extra llm python gensim/run_simulation.py \
+  scene_source=unisis \
+  unisis.scene_path=/path/to/scene.yaml \
+  unisis.end_effector=suction \
+  trials=1 disp=True
+```
+
+UniSis mode substitutes the YAML task for the first LLM task-design response.
+The remaining stages read the execution API and error guidance, select existing
+task code references, and generate an `ExistingSceneTask` implementation.
+The default prompt set is switched to `unisis_task_execution_prompt` in this
+mode; the original prompt files are unchanged. The supported initial task schema
+contains `name`, `description`, `target_id`, and a world-space `goal_point`.
+Generated task code binds existing entity IDs and registers goals; it must not
+create objects or change the scene's initial layout.
+
+`Environment.reset()` rebuilds the YAML in the existing GenSim PyBullet client,
+then initializes the task. Entity names are resolved after every reset because
+PyBullet body IDs are runtime values. The original oracle/action/data interfaces
+are retained. Cameras and the manipulation workspace are configured around the
+task, rather than the entire room.
+
+The current robot adaptation uses the YAML Franka arm with GenSim's simulated
+suction tool. Franka IK and the tool/contact coordinate transforms are adapted;
+suction still attaches contacted rigid bodies with a fixed constraint.
+Scene-mode joint motion is bounded by simulated-time physics steps, because
+large room meshes may run slower than real time; original-mode wall-clock
+timeouts are unchanged. It is
+not a simulation of vacuum pressure. The original Panda fingers are prevented
+from interfering with the suction attachment. A separate tool interface reserves
+future parallel-gripper support; selecting an unimplemented tool fails explicitly.
+
+This is an execution adaptation of GenSim. The native reward and saved rollout
+are useful for debugging; a shared UniSis/ManiGen experiment success checker is
+not yet integrated. LLM code generation is open-loop: simulation failures are
+recorded, not automatically sent back to the model for repair.

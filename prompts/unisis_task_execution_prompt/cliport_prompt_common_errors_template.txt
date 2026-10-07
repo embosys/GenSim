@@ -1,0 +1,19 @@
+Check the fixed-scene task for these errors before generating code:
+
+- The YAML must define `target_id` and a finite three-value `goal_point`.
+- Resolve the target only through `self.add_scene_goal`; do not use
+  `env.add_object`, `env.add_goal`, PyBullet creation/loading calls, or direct
+  body pose/color/dynamics mutation.
+- Inherit from `ExistingSceneTask` and call `super().reset(env)` before adding
+  the goal. Use the exact `self.scene_task["target_id"]` and
+  `self.scene_task["goal_point"]` values.
+- The fixed-scene adapter supports one move goal. It preserves the target's
+  current orientation and uses the supplied goal point as the placement pose.
+- Do not create assets, randomize the scene, or refer to an asset path as a
+  replacement for an existing entity.
+- Entity positions and goal_point use world XYZ. The compact scene-entities
+  catalog has rotations normalized to PyBullet XYZW; raw YAML may use WXYZ
+  quaternions or Euler angles.
+
+Task metadata:
+TASK_STRING_TEMPLATE

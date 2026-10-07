@@ -1,0 +1,3 @@
+UniSis fixed-scene mode does not design a new task or scene. The task definition
+and scene entity catalog are loaded from the configured YAML file and passed to
+the later API, reference, and code prompts without rewriting the target or goal.
