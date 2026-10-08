@@ -1,4 +1,3 @@
-import openai
 import argparse
 import os
 from cliport import tasks
@@ -20,46 +19,42 @@ import hydra
 from datetime import datetime
 
 from gensim.memory import Memory
-from gensim.utils import set_gpt_model, clear_messages, format_finetune_prompt
+from gensim.llm import chat_completion, completion, configure_llm, get_llm_model
+from gensim.utils import format_finetune_prompt
 
 @hydra.main(config_path='../cliport/cfg', config_name='data', version_base="1.2")
 def main(cfg):
     task = cfg.target_task
-    model = cfg.target_model
+    configure_llm()
+    model = get_llm_model()
+    requested_model = cfg.get('target_model')
+    if requested_model and requested_model != model:
+        raise ValueError(
+            f"target_model {requested_model!r} does not match LLM_MODEL {model!r}; update .env."
+        )
     prompt = format_finetune_prompt(task)
-
-    openai.api_key = cfg['openai_key']
     # model_time = datetime.now().strftime("%d_%m_%Y_%H:%M:%S")
 
     #
-    cfg['model_output_dir'] = os.path.join(cfg['output_folder'], cfg['prompt_folder'] + "_" + cfg.target_model)
+    cfg['model_output_dir'] = os.path.join(cfg['output_folder'], cfg['prompt_folder'] + "_" + model)
     if 'seed' in cfg:
        cfg['model_output_dir'] = cfg['model_output_dir'] + f"_{cfg['seed']}"
 
-    set_gpt_model(cfg['gpt_model'])
     memory = Memory(cfg)
     simulation_runner = TopDownSimulationRunner(cfg, memory)
 
     for trial_i in range(cfg['trials']):
-        if 'new_finetuned_model' in cfg or 'gpt-3.5-turbo' in cfg.target_model:
-                # the chat completion version
-                response = openai.ChatCompletion.create(
-                model=model,
-                messages=[{"role": "system", "content": "You are an AI in robot simulation code and task design."},
-                          {"role": "user", "content": prompt}],
-                temperature=0.01,
-                max_tokens=1000,
-                n=1,
-                stop=["\n```\n"])
-                res = response["choices"][0]["message"]["content"]
+        legacy_completion_model = any(
+            name in model.lower() for name in ("davinci", "curie", "babbage", "ada")
+        )
+        if 'new_finetuned_model' in cfg or not legacy_completion_model:
+            messages = [
+                {"role": "system", "content": "You are an AI in robot simulation code and task design."},
+                {"role": "user", "content": prompt},
+            ]
+            res = chat_completion(messages, temperature=0.01, max_tokens=1000, stop=["\n```\n"])[0]
         else:
-            response = openai.Completion.create(
-                model=model,
-                prompt=prompt,
-                temperature=0,
-                max_tokens=1800,
-                stop=["\n```\n"])
-            res = response["choices"][0]["text"]
+            res = completion(prompt, temperature=0, max_tokens=1800, stop=["\n```\n"])[0]
 
         simulation_runner.task_creation(res)
         simulation_runner.simulate_task()

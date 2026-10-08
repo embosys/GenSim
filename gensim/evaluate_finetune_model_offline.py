@@ -1,4 +1,3 @@
-import openai
 import argparse
 import os
 from cliport import tasks
@@ -20,7 +19,7 @@ import hydra
 from datetime import datetime
 
 from gensim.memory import Memory
-from gensim.utils import set_gpt_model, clear_messages, format_finetune_prompt
+from gensim.utils import format_finetune_prompt
 from gensim.utils import (
     mkdir_if_missing,
     save_text)
@@ -28,7 +27,6 @@ import csv
 
 @hydra.main(config_path='../cliport/cfg', config_name='data', version_base="1.2")
 def main(cfg):
-    openai.api_key = cfg['openai_key']
 
 
     cfg['model_output_dir'] = os.path.join(cfg['output_folder'], cfg['model_output_dir'])
@@ -36,7 +34,6 @@ def main(cfg):
        cfg['model_output_dir'] = cfg['model_output_dir'] + f"_{cfg['seed']}"
 
     eval_model_output_dir =  "eval_" + cfg['model_output_dir']
-    set_gpt_model(cfg['gpt_model'])
     memory = Memory(cfg)
     simulation_runner = TopDownSimulationRunner(cfg, memory)
 

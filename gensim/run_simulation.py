@@ -4,7 +4,6 @@ import hydra
 import random
 
 import re
-import openai
 import IPython
 import time
 import pybullet as p
@@ -20,19 +19,19 @@ from gensim.agent import Agent
 from gensim.critic import Critic
 from gensim.sim_runner import SimulationRunner
 from gensim.memory import Memory
-from gensim.utils import set_gpt_model, clear_messages
+from gensim.llm import configure_llm
+from gensim.utils import clear_messages
 
 
 @hydra.main(config_path='../cliport/cfg', config_name='data', version_base="1.2")
 def main(cfg):
-    openai.api_key = cfg['openai_key']
+    configure_llm()
 
     model_time = datetime.now().strftime("%d_%m_%Y_%H:%M:%S")
     cfg['model_output_dir'] = os.path.join(cfg['output_folder'], cfg['prompt_folder'] + "_" + model_time)
     if 'seed' in cfg:
        cfg['model_output_dir'] = cfg['model_output_dir'] + f"_{cfg['seed']}"
 
-    set_gpt_model(cfg['gpt_model'])
     memory = Memory(cfg)
     agent = Agent(cfg, memory)
     critic = Critic(cfg, memory)

@@ -15,7 +15,6 @@ from pygments.lexers import PythonLexer
 from pygments.formatters import TerminalFormatter
 import re
 
-import openai
 import IPython
 import time
 import pybullet as p
@@ -29,16 +28,30 @@ import json
 import operator
 import csv
 import itertools
+import warnings
 
-model = "gpt-4"
-# model = "gpt-3.5-turbo-16k"
-# model = "gpt-4-0613"
+from gensim.llm import (
+    chat_completion,
+    completion,
+    get_context_budget,
+    get_llm_model,
+)
+
+model = None
 
 def set_gpt_model(gpt_model_name):
-    """ globally set gpt-model"""
+    """Deprecated shim; model selection comes from LLM_MODEL in root .env."""
     global model
-    model = gpt_model_name
-    print("use gpt model:", model)
+    model = get_llm_model()
+    warnings.warn(
+        "set_gpt_model() is deprecated; set LLM_MODEL in the GenSim root .env.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if gpt_model_name and gpt_model_name != model:
+        print(f"ignoring legacy model argument; using LLM_MODEL={model}")
+    else:
+        print("use LLM model:", model)
 
 def mkdir_if_missing(dst_dir):
     if not os.path.exists(dst_dir):
@@ -315,71 +328,95 @@ def compute_diversity_score_from_assets(task_assets, total_trials):
 
     return score / len(pairs)
 
-def truncate_message_for_token_limit(message_history, max_tokens=6000):
-    truncated_messages = []
-    tokens = 0
+_SYSTEM_MESSAGE_PROMPT = (
+    "You are a helpful and expert assistant in robot simulation code writing and task design."
+)
 
-    # reverse
-    for idx in range(len(message_history)-1, -1, -1) :
-        message = message_history[idx]
-        message_tokens = len(message['content']) / 4 # rough estimate.
-        # print("message_tokens:", message['content'])
-        if tokens + message_tokens > max_tokens:
-            break  # This message would put us over the limit
 
-        truncated_messages.append(message)
-        tokens += message_tokens
+def _estimate_message_tokens(message):
+    return (len(str(message.get("content", ""))) + 3) // 4
 
-    truncated_messages.reverse()
-    # print("truncated messages:", len(truncated_messages))
+
+def truncate_message_for_token_limit(message_history, max_tokens=None):
+    if max_tokens is None:
+        max_tokens = get_context_budget()
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        raise ValueError("max_tokens must be a positive integer.")
+    history = list(message_history)
+    current_prompt = None
+    if history and history[-1].get("role") == "user":
+        current_prompt = history.pop()
+
+    if len(history) % 2:
+        raise ValueError("message history must contain complete user/assistant exchanges.")
+    exchanges = []
+    for index in range(0, len(history), 2):
+        user_message, assistant_message = history[index:index + 2]
+        if (
+            user_message.get("role") != "user"
+            or assistant_message.get("role") != "assistant"
+        ):
+            raise ValueError("message history must contain complete user/assistant exchanges.")
+        exchanges.append((user_message, assistant_message))
+
+    system_tokens = _estimate_message_tokens({"content": _SYSTEM_MESSAGE_PROMPT})
+    current_tokens = _estimate_message_tokens(current_prompt) if current_prompt else 0
+    if system_tokens + current_tokens > max_tokens:
+        raise ValueError(
+            "Current prompt plus system message exceeds LLM_CONTEXT_BUDGET."
+        )
+
+    tokens = system_tokens + current_tokens
+    selected_exchanges = []
+    for exchange in reversed(exchanges):
+        exchange_tokens = sum(_estimate_message_tokens(message) for message in exchange)
+        if tokens + exchange_tokens > max_tokens:
+            break
+        selected_exchanges.append(exchange)
+        tokens += exchange_tokens
+
+    selected_exchanges.reverse()
+    truncated_messages = [message for exchange in selected_exchanges for message in exchange]
+    if current_prompt is not None:
+        truncated_messages.append(current_prompt)
     return truncated_messages
 
 def insert_system_message(message_history):
-    system_message_prompt = 'You are a helpful and expert assistant in robot simulation code writing and task design.'
-    'You design tasks that are creative and do-able by table-top manipulation. '
-    'You write code without syntax errors and always think through and document your code carefully. '
-    message_history.insert(0, {"role": "system", "content": system_message_prompt})
+    message_history.insert(0, {"role": "system", "content": _SYSTEM_MESSAGE_PROMPT})
 
 # globally always feed the previous reply as the assistant message back into the model
 existing_messages = []
-def generate_feedback(prompt, max_tokens=2048, temperature=0.0, interaction_txt=None, retry_max=5, n=1):
-    """ use GPT-4 API """
+def generate_feedback(prompt, max_tokens=None, temperature=0.0, interaction_txt=None, retry_max=5, n=1):
+    """Generate chat feedback while keeping the legacy scalar/list return shape."""
     global existing_messages
-    global model
-    if model == "text-davinci-003":
-        return generate_feedback_completion_only(prompt, max_tokens, temperature)
-    existing_messages.append({"role": "user", "content": prompt})
-    truncated_messages = truncate_message_for_token_limit(existing_messages)
-    insert_system_message(truncated_messages)
+    if get_llm_model() == "text-davinci-003":
+        return generate_feedback_completion_only(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            interaction_txt=interaction_txt,
+            retry_max=retry_max,
+            n=n,
+        )
+    user_message = {"role": "user", "content": prompt}
+    messages = truncate_message_for_token_limit([*existing_messages, user_message])
+    insert_system_message(messages)
+    responses = chat_completion(
+        messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        n=n,
+    )
 
-    params = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": truncated_messages,
-        "n": n
-    }
+    # retry_max remains accepted for compatibility; the SDK owns request retries.
+    existing_messages.extend((user_message, {"role": "assistant", "content": responses[0]}))
+    if interaction_txt is not None:
+        add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)
+        add_to_txt(interaction_txt, ">>> Answer: \n" + responses[0], with_print=False)
 
-    for retry in range(retry_max):
-        try:
-            if interaction_txt is not None:
-                add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)
-            call_res = openai.ChatCompletion.create(**params)
-            res = call_res["choices"][0]["message"]["content"]
-            existing_messages.append({"role": "assistant", "content": res})
-
-            to_print = highlight(f"{res}", PythonLexer(), TerminalFormatter())
-            print(to_print)
-            if interaction_txt is not None:
-                add_to_txt(interaction_txt,  ">>> Answer: \n" + res, with_print=False)
-
-            if n > 1:
-                return [r["message"]["content"] for r in call_res["choices"]]
-            return res
-
-        except Exception as e:
-            print("failed chat completion", e)
-    raise Exception("Failed to generate")
+    to_print = highlight(f"{responses[0]}", PythonLexer(), TerminalFormatter())
+    print(to_print)
+    return responses if n > 1 else responses[0]
 
 def clear_messages():
     global existing_messages
@@ -398,35 +435,17 @@ def format_finetune_prompt_codeonly(task_name, prompt_file='finetune_instruction
     prompt_text = instruction_text
     return prompt_text
 
-existing_messages = []
-def generate_feedback_completion_only(prompt, max_tokens=800, temperature=0.0, interaction_txt=None, retry_max=5, n=1):
-    """ use GPT-4 API """
+def generate_feedback_completion_only(prompt, max_tokens=None, temperature=0.0, interaction_txt=None, retry_max=5, n=1):
+    """Generate text using a legacy completion endpoint."""
     print("prompt size:", len(prompt))
-    params = {
-        "model": model,
-        "max_tokens": 1200,
-        "temperature": temperature,
-        "prompt": prompt[-6000:], # in total 2048
-        "n": n
-    }
-
-    for retry in range(retry_max):
-        try:
-            if interaction_txt is not None:
-                add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)
-            call_res = openai.Completion.create(**params)
-            res = call_res["choices"][0]["text"]
-
-            to_print = highlight(f"{res}", PythonLexer(), TerminalFormatter())
-            print(to_print)
-            if interaction_txt is not None:
-                add_to_txt(interaction_txt,  ">>> Answer: \n" + res, with_print=False)
-
-            if n > 1:
-                return [r["text"] for r in call_res["choices"]]
-            return res
-
-        except Exception as e:
-            print("failed chat completion", e)
-    # IPython.embed()
-    raise Exception("Failed to generate")
+    responses = completion(
+        prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        n=n,
+    )
+    if interaction_txt is not None:
+        add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)
+        add_to_txt(interaction_txt, ">>> Answer: \n" + responses[0], with_print=False)
+    print(highlight(f"{responses[0]}", PythonLexer(), TerminalFormatter()))
+    return responses if n > 1 else responses[0]

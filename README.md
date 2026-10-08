@@ -11,26 +11,57 @@ This repo explores the use of an LLM code generation pipeline to write simulatio
 ![](media/gensim_teaser_v1.gif)
 
 ## ⚙️ Installation
-0. ``pip install -r requirements.txt``
-1. ``python -m pip install --editable .``
-2. ``export GENSIM_ROOT=$(pwd)``
-3. ``export OPENAI_KEY=YOUR KEY``. We use OpenAI's GPT-4 as the language model. You need to have an OpenAI API key to run task generation with GenSim. You can get one from [here](https://platform.openai.com/account/api-keys).
+```bash
+uv sync --locked --extra llm
+export GENSIM_ROOT="$PWD"
+cp -n .env.example .env
+```
+
+Edit `.env` and set `LLM_MODEL` and `LLM_API_KEY` for your account. GenSim loads
+this file from the repository root even when launched from another directory;
+shell environment variables take precedence. `.env` is ignored by Git.
+OpenAI, DeepSeek, Qwen, and other OpenAI-compatible Chat Completions endpoints
+use the same client: change `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY`.
+The commented examples in [.env.example](.env.example) show provider settings.
+For Qwen, use the endpoint for your workspace/region and a key from that region.
+
+All LLM settings are environment variables, not Hydra options. `gpt_model`,
+`openai_key`, and `gpt_temperature` have been removed from `config.yaml`.
+`LLM_MAX_OUTPUT_TOKENS` controls output length. Leave `LLM_TEMPERATURE` unset to
+retain the original stage temperatures, or set it to `null` for models that do
+not accept temperature. `LLM_EXTRA_BODY` is a JSON object for model-specific
+parameters (e.g. thinking mode). These parameters cannot replace core request
+fields. For models requiring `max_completion_tokens`, set
+`LLM_TOKEN_LIMIT_PARAM=max_completion_tokens`.
+
+Set `LLM_STREAM=true` for models requiring streaming; chunks are collected into
+one final answer for the existing task parser. Reasoning content is not parsed
+as task code. By default, multiple candidates use independent requests with
+the same conversation. Set `LLM_SUPPORTS_N=true` only if the selected backend
+and model support native `n`. Retries are handled once by the SDK, with
+`LLM_TIMEOUT` and `LLM_MAX_RETRIES` controlling their limits.
+
+`LLM_CONTEXT_BUDGET` is an approximate input budget (characters / 4, not a
+model-specific tokenizer). Old exchanges are trimmed in pairs; an oversized
+current prompt fails clearly instead of being silently removed. Choose this
+budget conservatively for your model and language. Empty or truncated model
+answers fail before task parsing.
 
 
 ## 🚶Getting Started
 After the installation process, you can run: 
 ```
 # basic bottom-up prompt
-python gensim/run_simulation.py disp=True prompt_folder=vanilla_task_generation_prompt_simple 
+uv run --extra llm python gensim/run_simulation.py disp=True prompt_folder=vanilla_task_generation_prompt_simple
 
 # bottom-up template generation
-python gensim/run_simulation.py disp=True prompt_folder=bottomup_task_generation_prompt   save_memory=True load_memory=True  task_description_candidate_num=10 use_template=True
+uv run --extra llm python gensim/run_simulation.py disp=True prompt_folder=bottomup_task_generation_prompt   save_memory=True load_memory=True  task_description_candidate_num=10 use_template=True
 
 # top-down task generation
-python gensim/run_simulation.py  disp=True  prompt_folder=topdown_task_generation_prompt save_memory=True load_memory=True task_description_candidate_num=10 use_template=True target_task_name="build-house"
+uv run --extra llm python gensim/run_simulation.py  disp=True  prompt_folder=topdown_task_generation_prompt save_memory=True load_memory=True task_description_candidate_num=10 use_template=True target_task_name="build-house"
 
 # task-conditioned chain-of-thought generation
-python gensim/run_simulation.py  disp=True  prompt_folder=topdown_chain_of_thought_prompt save_memory=True load_memory=True task_description_candidate_num=10 use_template=True target_task_name="build-car"  
+uv run --extra llm python gensim/run_simulation.py  disp=True  prompt_folder=topdown_chain_of_thought_prompt save_memory=True load_memory=True task_description_candidate_num=10 use_template=True target_task_name="build-car"
 ```
 
 ## 💾 Add and remove task
@@ -49,15 +80,21 @@ python gensim/run_simulation.py  disp=True  prompt_folder=topdown_chain_of_thoug
 
 
 ## 🎛️ LLM Finetune
+
+The commands below document the original fine-tuning experiments and legacy
+model IDs. Availability of those models and old fine-tuning CLI commands is
+not restored by the SDK upgrade. Current API evaluation selects its model
+with `LLM_MODEL` in `.env`; an optional old `target_model`/`--model` argument
+must agree with it.
 1. Prepare data using `python gensim/prepare_finetune_gpt.py`. Released dataset is [here](https://huggingface.co/datasets/Gen-Sim/Gen-Sim)
 
 2. Finetune using openai api ` openai api fine_tunes.create --training_file output/finetune_data_prepared.jsonl --model davinci --suffix 'GenSim'`
 
 3. Evaluate it using `python gensim/evaluate_finetune_model.py  +target_task=build-car +target_model=davinci:ft-mit-cal:gensim-2023-08-06-16-00-56`
 
-4. Compare with `python gensim/run_simulation.py  disp=True  prompt_folder=topdown_task_generation_prompt_simple load_memory=True task_description_candidate_num=10 use_template=True target_task_name="build-house" gpt_model=gpt-3.5-turbo-16k trials=3`
+4. Compare with `uv run --extra llm python gensim/run_simulation.py  disp=True  prompt_folder=topdown_task_generation_prompt_simple load_memory=True task_description_candidate_num=10 use_template=True target_task_name="build-house" trials=3`
 
-5. Compare with `python gensim/run_simulation.py  disp=True  prompt_folder=topdown_task_generation_prompt_simple_singleprompt load_memory=True task_description_candidate_num=10  target_task_name="build-house" gpt_model=gpt-3.5-turbo-16k` 
+5. Compare with `uv run --extra llm python gensim/run_simulation.py  disp=True  prompt_folder=topdown_task_generation_prompt_simple_singleprompt load_memory=True task_description_candidate_num=10  target_task_name="build-house"`
 
 6. turbo finetuned models. `python gensim/evaluate_finetune_model.py  +target_task=build-car +target_model=ft:gpt-3.5-turbo-0613:  trials=3 disp=True  `
 

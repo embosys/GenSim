@@ -32,7 +32,6 @@ from pygments.lexers import PythonLexer
 from pygments.formatters import TerminalFormatter
 import re
 
-import openai
 import IPython
 import time
 import pybullet as p
@@ -43,6 +42,7 @@ import cv2
 import re
 import random
 import json
+from gensim.llm import chat_completion, configure_llm
 from cliport.simgen_utils import (mkdir_if_missing,
         save_text,
         add_to_txt,
@@ -57,38 +57,25 @@ from cliport.simgen_utils import (mkdir_if_missing,
 
 
 
-openai.api_key = "YOUR_KEY"
-model = "gpt-4"
 NEW_TASK_LIST = []
 full_interaction = ''
 
-def generate_feedback(prompt, max_tokens=2048, temperature=0.0, model="gpt-4", assistant_prompt=None, interaction_txt=None):
-    """ use GPT-4 API """
-    params = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": [
-                  {"role": "user", "content": prompt}],
-    }
+def generate_feedback(prompt, max_tokens=None, temperature=0.0, assistant_prompt=None, interaction_txt=None):
+    """Generate one chat response while preserving the local interaction log."""
+    messages = []
     if assistant_prompt is not None:
-        params["messages"].append({"role": "assistant", "content": assistant_prompt})
+        messages.append({"role": "assistant", "content": assistant_prompt})
+    messages.append({"role": "user", "content": prompt})
 
-    for retry in range(3):
-        try:
-            if interaction_txt is not None:
-                interaction_txt = add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)
-            res = openai.ChatCompletion.create(**params)["choices"][0]["message"]["content"]
-            to_print = highlight(f"{res}", PythonLexer(), TerminalFormatter())
-            print(to_print)
-            if interaction_txt is not None:
-                interaction_txt = add_to_txt(interaction_txt,  ">>> Answer: \n" + res, with_print=False)
-                return res, interaction_txt
-            return res
-
-        except Exception as e:
-            print("failed chat completion", e)
-    raise Exception("Failed to generate")
+    if interaction_txt is not None:
+        interaction_txt = add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)
+    res = chat_completion(messages, max_tokens=max_tokens, temperature=temperature)[0]
+    to_print = highlight(f"{res}", PythonLexer(), TerminalFormatter())
+    print(to_print)
+    if interaction_txt is not None:
+        interaction_txt = add_to_txt(interaction_txt, ">>> Answer: \n" + res, with_print=False)
+        return res, interaction_txt
+    return res
 
 
 def llm_gen_env(cfg, model_output_dir):
@@ -99,7 +86,7 @@ def llm_gen_env(cfg, model_output_dir):
     start_time = time.time()
     prompt_folder = f"prompts/{cfg['prompt_folder']}"
     task_prompt_text = open(f"{prompt_folder}/cliport_prompt_task.txt").read()
-    res, full_interaction = generate_feedback(task_prompt_text, temperature=cfg['gpt_temperature'], interaction_txt=full_interaction)
+    res, full_interaction = generate_feedback(task_prompt_text, temperature=0.8, interaction_txt=full_interaction)
 
     # Extract dictionary for task name, descriptions, and assets
     task_def = extract_dict(res, prefix="new_task")
@@ -116,7 +103,7 @@ def llm_gen_env(cfg, model_output_dir):
         asset_prompt_text = asset_prompt_text.replace("TASK_NAME_TEMPLATE", new_task["task-name"])
         asset_prompt_text = asset_prompt_text.replace("ASSET_STRING_TEMPLATE", str(new_task["assets-used"]))
 
-        res, full_interaction = generate_feedback(asset_prompt_text, temperature=0, assistant_prompt=res, interaction_txt=full_interaction) # cfg['gpt_temperature']
+        res, full_interaction = generate_feedback(asset_prompt_text, temperature=0, assistant_prompt=res, interaction_txt=full_interaction)
         save_text(model_output_dir,  f'{new_task["task-name"]}_asset_output', res)
         asset_list = extract_assets(res)
         # save_urdf(asset_list)
@@ -128,14 +115,14 @@ def llm_gen_env(cfg, model_output_dir):
         full_interaction = add_to_txt(full_interaction,"================= API Preview!")
         api_prompt_text = open(f'{prompt_folder}/cliport_prompt_api_template.txt').read()
         api_prompt_text = api_prompt_text.replace("TASK_NAME_TEMPLATE", new_task["task-name"])
-        res, full_interaction = generate_feedback(api_prompt_text, temperature=0, assistant_prompt=res, interaction_txt=full_interaction) # cfg['gpt_temperature']
+        res, full_interaction = generate_feedback(api_prompt_text, temperature=0, assistant_prompt=res, interaction_txt=full_interaction)
 
     # Error Preview
     if os.path.exists(f"{prompt_folder}/cliport_prompt_common_errors_template.txt"):
         full_interaction = add_to_txt(full_interaction,"================= Error Book Preview!")
         errorbook_prompt_text = open(f'{prompt_folder}/cliport_prompt_common_errors_template.txt').read()
         errorbook_prompt_text = errorbook_prompt_text.replace("TASK_NAME_TEMPLATE", new_task["task-name"])
-        res, full_interaction = generate_feedback(errorbook_prompt_text, temperature=0., assistant_prompt=res, interaction_txt=full_interaction) # cfg['gpt_temperature']
+        res, full_interaction = generate_feedback(errorbook_prompt_text, temperature=0., assistant_prompt=res, interaction_txt=full_interaction)
 
     # Generate Code
     if os.path.exists(f"{prompt_folder}/cliport_prompt_code_split_template.txt"):
@@ -143,7 +130,7 @@ def llm_gen_env(cfg, model_output_dir):
         code_prompt_text = open(f"{prompt_folder}/cliport_prompt_code_split_template.txt").read()
         code_prompt_text = code_prompt_text.replace("TASK_NAME_TEMPLATE", new_task["task-name"])
         code_prompt_text = code_prompt_text.replace("TASK_STRING_TEMPLATE", str(new_task))
-        res, full_interaction = generate_feedback(code_prompt_text, temperature=0., assistant_prompt=res, interaction_txt=full_interaction) # cfg['gpt_temperature']
+        res, full_interaction = generate_feedback(code_prompt_text, temperature=0., assistant_prompt=res, interaction_txt=full_interaction)
 
     code, task_name = extract_code(res)
 
@@ -168,6 +155,7 @@ def llm_gen_env(cfg, model_output_dir):
 @hydra.main(config_path='./cfg', config_name='data')
 def main(cfg):
     global full_interaction
+    configure_llm()
 
     # Evaluation Metric
     SYNTAX_PASS_RATE = 0.
@@ -320,7 +308,7 @@ def main(cfg):
             code_reflection_prompt_text = open(f"{prompt_folder}/cliport_prompt_task_reflection.txt").read()
             code_reflection_prompt_text = code_reflection_prompt_text.replace("CURRENT_TASK_NAME_TEMPLATE", str(task_descriptions_replacement_str))
             code_reflection_prompt_text = code_reflection_prompt_text.replace("TASK_STRING_TEMPLATE", str(new_task))
-            res, full_interaction = generate_feedback(code_reflection_prompt_text, temperature=0., interaction_txt=full_interaction) # cfg['gpt_temperature']
+            res, full_interaction = generate_feedback(code_reflection_prompt_text, temperature=0., interaction_txt=full_interaction)
             reflection_def_cmd = extract_dict(res, prefix='task_reflection')
             exec(reflection_def_cmd, globals())
             print("save task result:", task_reflection)

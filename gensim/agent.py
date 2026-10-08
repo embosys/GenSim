@@ -263,7 +263,7 @@ class Agent:
 
         res = generate_feedback(
             task_prompt_text,
-            temperature=self.cfg["gpt_temperature"],
+            temperature=0.8,
             interaction_txt=self.chat_log,
         )
 

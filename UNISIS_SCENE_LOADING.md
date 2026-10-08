@@ -65,13 +65,16 @@ of UniSis sensor outputs. No additional robot, table, or floor is inserted.
 
 ## GenSim task execution
 
+LLM connections and generation options are loaded from the repository-root
+`.env`; see `.env.example` and the README for OpenAI/DeepSeek/Qwen examples.
+
 The original entry point remains `gensim/run_simulation.py`. The default
 `scene_source=original` retains the original task-design and UR5 workflow.
 To execute a fixed UniSis scene and its task instead:
 
 ```bash
 export GENSIM_ROOT="$PWD"
-# Set OPENAI_KEY through your shell/environment before running.
+# Fill in LLM_BASE_URL, LLM_MODEL, and LLM_API_KEY in the repository-root .env.
 uv run --extra llm python gensim/run_simulation.py \
   scene_source=unisis \
   unisis.scene_path=/path/to/scene.yaml \

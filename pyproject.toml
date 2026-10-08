@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llm = ["openai==0.28.1", "seaborn>=0.13,<0.14"]
+llm = ["openai>=2,<4", "python-dotenv>=1,<2", "seaborn>=0.13,<0.14"]
 
 [tool.uv]
 package = true

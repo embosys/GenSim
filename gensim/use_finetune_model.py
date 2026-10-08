@@ -1,4 +1,3 @@
-import openai
 import argparse
 import os
 from cliport import tasks
@@ -13,35 +12,34 @@ import time
 import random
 import json
 
-from gensim.utils import set_gpt_model, clear_messages, format_finetune_prompt
+from gensim.llm import chat_completion, completion, configure_llm, get_llm_model
+from gensim.utils import format_finetune_prompt
 
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, default='build-car')
-    parser.add_argument("--model", type=str, default='davinci:ft-wang-lab:gensim-2023-08-05-16-54-05')
+    parser.add_argument("--model", type=str, default=None)
     # davinci:ft-mit-cal:gensim-2023-08-06-16-00-56
     args = parser.parse_args()
     task = args.task
+    configure_llm()
+    model = get_llm_model()
+    if args.model and args.model != model:
+        raise ValueError(f"--model {args.model!r} does not match LLM_MODEL {model!r}; update .env.")
     prompt = format_finetune_prompt(task)
-
-    if True:
-        response = openai.Completion.create(
-            model=args.model,
-            prompt=prompt,
-            temperature=0,
-            max_tokens=1024)
-        res = response["choices"][0]["text"]
+    legacy_completion_model = any(
+        name in model.lower() for name in ("davinci", "curie", "babbage", "ada")
+    )
+    if legacy_completion_model:
+        res = completion(prompt, temperature=0, max_tokens=1024)[0]
     else:
-        params = {
-            "model": args.model,
-            "max_tokens": 500,
-            "temperature": 0.1,
-            "messages": [prompt]
-        }
-        call_res = openai.ChatCompletion.create(**params)
-        res = call_res["choices"][0]["message"]["content"]
+        messages = [
+            {"role": "system", "content": "You are an AI in robot simulation code and task design."},
+            {"role": "user", "content": prompt},
+        ]
+        res = chat_completion(messages, temperature=0, max_tokens=1024)[0]
 
     print("code!:", res)
     python_file_path = f"cliport/generated_tasks/finetune_{task.replace('-','_')}.py"

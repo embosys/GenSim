@@ -31,7 +31,7 @@ class Critic:
             self.chat_log = add_to_txt(self.chat_log, "================= Error Book Preview!", with_print=True)
             errorbook_prompt_text = open(f'{self.prompt_folder}/cliport_prompt_common_errors_template.txt').read()
             errorbook_prompt_text = errorbook_prompt_text.replace("TASK_NAME_TEMPLATE", new_task["task-name"])
-            res = generate_feedback(errorbook_prompt_text, temperature=0., interaction_txt=self.chat_log) # cfg['gpt_temperature']
+            res = generate_feedback(errorbook_prompt_text, temperature=0., interaction_txt=self.chat_log)
 
     def reflection(self, new_task, new_code, current_tasks=None):
         """ reflect on if the new task needs to be added """
@@ -65,7 +65,9 @@ class Critic:
 
             # no matter
             total_tasks[new_task["task-name"].replace("-", "_")] = str(new_task)
-            res = generate_feedback(code_reflection_prompt_text, temperature=0.4, interaction_txt=self.chat_log, n=int(self.cfg['reflection_agreement_num'])) # cfg['gpt_temperature']
+            res = generate_feedback(code_reflection_prompt_text, temperature=0.4, interaction_txt=self.chat_log, n=int(self.cfg['reflection_agreement_num']))
+            if isinstance(res, str):
+                res = [res]
             all_add_to_the_task_list_flag = True
 
             for idx, r in enumerate(res):
