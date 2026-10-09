@@ -153,6 +153,10 @@ gensim/<run_id>/
   trajectory/{color,depth,action,reward,info}/*.pkl
   artifacts/{eval_results.csv,full_interaction.txt}
   artifacts/videos/       # when record.save_video=True
+  state/replay_001/       # optional independent oracle replay state
+    manifest.json
+    final_state.json
+    final_state.bullet
 ```
 
 Run from the repository root with `.env` configured:
@@ -170,6 +174,26 @@ use base seed + trial index; attempts add their own index to that trial seed.
 `output_folder` and `data_dir` only control the original mode; UniSis paths are
 owned by the run directory. Failed generation and execution also retain results
 and available logs. Ordinary errors finish the remaining trials then exit nonzero.
+
+Replay a saved generated task once and export its final PyBullet entity state:
+
+```bash
+uv run python scripts/replay_save_state.py /path/to/gensim/<run_id> \
+  --seed 123 --settle-seconds 0.5
+```
+
+The script defaults to `<run_dir>/code/task.py` and uses the scene, robot setup,
+and seed from `run_meta.json`; `--code` and `--scene` can override the paths.
+`--vis` shows the PyBullet GUI. Each completed replay receives the next free
+`state/replay_NNN/` directory. `final_state.json` stores every mapped scene
+entity's root-frame position, WXYZ quaternion, and joint positions, including
+entities from unsuccessful oracle sequences. A replay error does not create a
+state directory. The manifest records the replay reward separately from the
+original run's native result; reward does not filter state export.
+`final_state.json` is the portable state
+consumed by the shared converter. `final_state.bullet` is a PyBullet-native
+backup for restoration with the matching scene and engine setup; the converter
+does not read it.
 
 `native_success` retains the GenSim reward (>0.99) and majority-of-attempts rule.
 `success` is null until the shared experiment checker is connected. Only successful
