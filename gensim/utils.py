@@ -386,7 +386,7 @@ def insert_system_message(message_history):
 
 # globally always feed the previous reply as the assistant message back into the model
 existing_messages = []
-def generate_feedback(prompt, max_tokens=None, temperature=0.0, interaction_txt=None, retry_max=5, n=1):
+def generate_feedback(prompt, max_tokens=None, temperature=0.0, interaction_txt=None, retry_max=5, n=1, phase=None):
     """Generate chat feedback while keeping the legacy scalar/list return shape."""
     global existing_messages
     if get_llm_model() == "text-davinci-003":
@@ -397,6 +397,7 @@ def generate_feedback(prompt, max_tokens=None, temperature=0.0, interaction_txt=
             interaction_txt=interaction_txt,
             retry_max=retry_max,
             n=n,
+            phase=phase,
         )
     user_message = {"role": "user", "content": prompt}
     messages = truncate_message_for_token_limit([*existing_messages, user_message])
@@ -406,6 +407,7 @@ def generate_feedback(prompt, max_tokens=None, temperature=0.0, interaction_txt=
         max_tokens=max_tokens,
         temperature=temperature,
         n=n,
+        phase=phase,
     )
 
     # retry_max remains accepted for compatibility; the SDK owns request retries.
@@ -435,7 +437,7 @@ def format_finetune_prompt_codeonly(task_name, prompt_file='finetune_instruction
     prompt_text = instruction_text
     return prompt_text
 
-def generate_feedback_completion_only(prompt, max_tokens=None, temperature=0.0, interaction_txt=None, retry_max=5, n=1):
+def generate_feedback_completion_only(prompt, max_tokens=None, temperature=0.0, interaction_txt=None, retry_max=5, n=1, phase=None):
     """Generate text using a legacy completion endpoint."""
     print("prompt size:", len(prompt))
     responses = completion(
@@ -443,6 +445,7 @@ def generate_feedback_completion_only(prompt, max_tokens=None, temperature=0.0, 
         max_tokens=max_tokens,
         temperature=temperature,
         n=n,
+        phase=phase,
     )
     if interaction_txt is not None:
         add_to_txt(interaction_txt, ">>> Prompt: \n" + prompt, with_print=False)

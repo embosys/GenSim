@@ -26,6 +26,7 @@ import pybullet as p
 class SimulationRunner:
     """ the main class that runs simulation loop """
     def __init__(self, cfg, agent, critic, memory):
+        self.output = None
         self.cfg = cfg
         self.agent = agent
         self.critic = critic
@@ -81,11 +82,15 @@ class SimulationRunner:
 
         try:
             start_time = time.time()
+            if self.output is not None:
+                self.output.phase = "scene_loading"
             self.generated_task = self.agent.propose_task(self.generated_task_names)
             self.generated_asset = self.agent.propose_assets()
             self.agent.api_review()
             self.critic.error_review(self.generated_task)
             self.generated_code, self.curr_task_name = self.agent.implement_task()
+            if self.output is not None:
+                self.output.meta["task"] = self.generated_task
             self.task_asset_logs.append(self.generated_task["assets-used"])
             self.generated_task_name = self.generated_task["task-name"]
             self.generated_tasks.append(self.generated_task)
@@ -96,6 +101,8 @@ class SimulationRunner:
             to_print = highlight(f"{str(traceback.format_exc())}", PythonLexer(), TerminalFormatter())
             print("Task Creation Exception:", to_print)
             self.task_creation_pass = False
+            if self.output is not None:
+                self.output.fail(traceback.format_exc())
 
         # self.curr_task_name = self.generated_task['task-name']
         print("task creation time {:.3f}".format(time.time() - start_time))
@@ -123,6 +130,7 @@ class SimulationRunner:
                 **env_kwargs,
             )
 
+        self.env = env
         task = eval(self.curr_task_name)()
         task.mode = self.cfg['mode']
         record = self.cfg['record']['save_video']
@@ -132,6 +140,8 @@ class SimulationRunner:
         expert = task.oracle(env)
         self.cfg['task'] = self.generated_task["task-name"]
         data_path = os.path.join(self.cfg['data_dir'], "{}-{}".format(self.generated_task["task-name"], task.mode))
+        if self.output is not None:
+            data_path = self.cfg["data_dir"]
         dataset = RavensDataset(data_path, self.cfg, n_demos=0, augment=False)
         print(f"Saving to: {data_path}")
         print(f"Mode: {task.mode}")
@@ -190,7 +200,11 @@ class SimulationRunner:
 
         # Check syntax and compilation-time error
         try:
+            if self.output is not None:
+                self.output.phase = "code_execution"
             exec(self.generated_code, globals())
+            if self.output is not None:
+                self.output.phase = "scene_loading"
             task, dataset, env, expert = self.setup_env()
             self.syntax_pass_rate += 1
 
@@ -199,6 +213,8 @@ class SimulationRunner:
             save_text(self.cfg['model_output_dir'], self.generated_task_name + '_error', str(traceback.format_exc()))
             print("========================================================")
             print("Syntax Exception:", to_print)
+            if self.output is not None:
+                self.output.fail(traceback.format_exc())
             return
 
         try:
@@ -253,15 +269,29 @@ class SimulationRunner:
         try:
             for attempt in range(max_attempts):
                 episode = []
-                seed = 123 + attempt
+                seed = (self.output.seed if self.output is not None else 123) + attempt
+                if self.output is not None:
+                    self.output.phase = "execution"
+                    attempt_result = {"seed": seed, "status": "running", "reward": None, "native_success": None}
+                    self.output.result["attempts"].append(attempt_result)
                 total_reward = self.run_one_episode(
                     dataset, expert, env, task, episode, seed
                 )
+                if self.output is not None:
+                    attempt_result.update(status="completed", reward=float(total_reward), native_success=bool(total_reward > 0.99))
                 if total_reward > 0.99:
                     success_count += 1
                     if self.cfg["save_data"]:
+                        if self.output is not None:
+                            self.output.phase = "trajectory_saving"
                         dataset.add(seed, episode)
+                if self.cfg["record"]["save_video"]:
+                    env.end_rec()
+                    if attempt + 1 < max_attempts:
+                        env.start_rec(f"attempt_{attempt + 2:03d}")
 
+            if self.output is not None:
+                self.output.result["native_success"] = success_count >= math.ceil(max_attempts / 2)
             self.runtime_pass_rate += 1
             print("Runtime Test Pass!")
             if success_count >= math.ceil(max_attempts / 2):
@@ -280,7 +310,12 @@ class SimulationRunner:
             )
             print("========================================================")
             print("Runtime Exception:", to_print)
+            if self.output is not None:
+                if self.output.result["attempts"]:
+                    self.output.result["attempts"][-1]["status"] = "error"
+                self.output.fail(traceback.format_exc())
         finally:
             # Fixed-scene tasks are evaluated directly; do not run the old
             # novelty reflection or add their metadata/code to generic memory.
-            self.memory.save_run(self.generated_task)
+            if self.output is None:
+                self.memory.save_run(self.generated_task)

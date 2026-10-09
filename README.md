@@ -134,3 +134,48 @@ booktitle = {Arxiv},
 year      = {2023}
 }
 ```
+
+
+### Scene-local UniSis experiment outputs
+
+`scene_source=unisis` writes each trial into `<scene directory>/gensim/<timestamp>_s<seed>/`.
+The original scene-generation mode keeps its existing output layout. Scene files and
+assets are referenced in place. Older outputs are not moved.
+
+```text
+gensim/<run_id>/
+  run_meta.json           # scene YAML hash, source commit, seeds, safe LLM settings
+  result.json             # status, native_success, attempts, artifact counts
+  run.log                 # console and simulator output
+  llm/index.json
+  llm/turn_0001_*.json     # actual messages, parameters, raw response, usage, timing/errors
+  code/task.py
+  trajectory/{color,depth,action,reward,info}/*.pkl
+  artifacts/{eval_results.csv,full_interaction.txt}
+  artifacts/videos/       # when record.save_video=True
+```
+
+Run from the repository root with `.env` configured:
+
+```bash
+GENSIM_ROOT="$PWD" uv run --locked --extra llm python -m gensim.run_simulation \
+  scene_source=unisis unisis.scene_path=/path/to/002_living_room \
+  trials=1 max_env_run_cnt=1 disp=False save_data=True
+```
+
+Optional overrides: `unisis.output_dir=/path/to/results`, `unisis.run_id=my_run`,
+`unisis.seed=123`. Existing run IDs fail instead of overwriting. Multiple trials
+append `_t001`, `_t002` to an explicit ID, create fresh task/LLM histories, and
+use base seed + trial index; attempts add their own index to that trial seed.
+`output_folder` and `data_dir` only control the original mode; UniSis paths are
+owned by the run directory. Failed generation and execution also retain results
+and available logs. Ordinary errors finish the remaining trials then exit nonzero.
+
+`native_success` retains the GenSim reward (>0.99) and majority-of-attempts rule.
+`success` is null until the shared experiment checker is connected. Only successful
+native demonstrations are saved; actions are high-level oracle actions, not dense
+joint trajectories. LLM call counts refer to logical SDK calls (including separate
+fallback calls for `n`), not hidden SDK HTTP retries. Usage stays null if the
+provider does not return it, including streams without usage chunks. The YAML
+hash does not fingerprint referenced assets; source_dirty flags uncommitted edits.
+No credentials or `.env` snapshot are included.

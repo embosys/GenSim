@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
+from dataclasses import asdict
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -35,6 +37,31 @@ class _Settings:
     supports_n: bool
     token_limit_param: str
     context_budget: int
+
+
+_run_output = None
+
+
+def set_run_output(output):
+    global _run_output
+    _run_output = output
+
+
+def set_run_phase(phase):
+    if _run_output is not None:
+        _run_output.phase = phase
+
+
+def get_llm_metadata():
+    configure_llm()
+    from importlib.metadata import version
+    settings = asdict(_settings)
+    # Endpoint is recorded without URL credentials or query parameters.
+    endpoint = urlparse(settings["base_url"] or "https://api.openai.com/v1")
+    settings["base_url"] = f"{endpoint.scheme}://{endpoint.hostname}" + (f":{endpoint.port}" if endpoint.port else "") + endpoint.path
+    settings["sdk_version"] = version("openai")
+    settings["call_count_semantics"] = "logical SDK calls; SDK transport retries are not counted separately"
+    return settings
 
 
 _client = None
@@ -360,7 +387,7 @@ def _stream_completion_contents(stream, expected: int) -> list[str]:
     )
 
 
-def _request_results(create, args: dict, n: int, *, chat: bool) -> list[str]:
+def _request_results(create, args: dict, n: int, *, chat: bool, messages=None, phase=None) -> list[str]:
     expected_per_call = n if _settings.supports_n else 1
     request_counts = [n] if _settings.supports_n else [1] * n
     results = []
@@ -368,8 +395,39 @@ def _request_results(create, args: dict, n: int, *, chat: bool) -> list[str]:
         request_args = dict(args)
         if _settings.supports_n:
             request_args["n"] = request_n
+        recorder = _run_output
+        call = None
+        raw = [] if _settings.stream else None
+        usage = None
+        started = time.monotonic()
+        if recorder is not None:
+            if phase:
+                recorder.phase = phase
+            payload = dict(request_args)
+            if messages is not None:
+                payload["messages"] = messages
+            call = recorder.begin_call(payload)
+        def serialize(value):
+            return value.model_dump(mode="json") if hasattr(value, "model_dump") else value
+        def observed_stream(stream):
+            nonlocal usage
+            try:
+                for chunk in stream:
+                    raw.append(serialize(chunk))
+                    if _read_field(chunk, "usage") is not None:
+                        usage = serialize(_read_field(chunk, "usage"))
+                    yield chunk
+            finally:
+                if hasattr(stream, "close"):
+                    stream.close()
         try:
             response = create(**request_args)
+            if recorder is not None:
+                if _settings.stream:
+                    response = observed_stream(response)
+                else:
+                    raw = serialize(response)
+                    usage = serialize(_read_field(response, "usage"))
             if _settings.stream:
                 contents = (
                     _stream_chat_contents(response, expected_per_call)
@@ -382,10 +440,17 @@ def _request_results(create, args: dict, n: int, *, chat: bool) -> list[str]:
                     if chat
                     else _completion_contents(response, expected_per_call)
                 )
-        except (LLMResponseError, LLMRequestError):
-            raise
-        except Exception as error:
-            raise _raise_request_error(error) from None
+        except BaseException as error:
+            safe_error = error if isinstance(error, (LLMResponseError, LLMRequestError, KeyboardInterrupt, SystemExit)) else _raise_request_error(error)
+            if call is not None:
+                recorder.end_call(call, status="error", raw_response=raw, usage=usage,
+                                  elapsed_seconds=time.monotonic() - started, error=str(safe_error))
+            if safe_error is error:
+                raise
+            raise safe_error from None
+        if call is not None:
+            recorder.end_call(call, status="completed", raw_response=raw, usage=usage,
+                              elapsed_seconds=time.monotonic() - started, content=contents)
         results.extend(contents)
     return results
 
@@ -396,6 +461,7 @@ def chat_completion(
     temperature: float = 0.0,
     n: int = 1,
     stop=None,
+    phase=None,
 ) -> list[str]:
     """Return final chat content for one or more completions."""
     stop = _stop_argument(stop)
@@ -418,6 +484,8 @@ def chat_completion(
         args,
         n,
         chat=True,
+        messages=normalized_messages,
+        phase=phase,
     )
 
 
@@ -427,6 +495,7 @@ def completion(
     temperature: float = 0.0,
     n: int = 1,
     stop=None,
+    phase=None,
 ) -> list[str]:
     """Return final text for a legacy text-completion endpoint."""
     stop = _stop_argument(stop)
@@ -443,4 +512,5 @@ def completion(
         args,
         n,
         chat=False,
+        phase=phase,
     )

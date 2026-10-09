@@ -312,7 +312,7 @@ class Agent:
             api_prompt_text = api_prompt_text.replace("TASK_STRING_TEMPLATE", str(self.new_task))
 
             res = generate_feedback(
-                api_prompt_text, temperature=0, interaction_txt=self.chat_log)
+                api_prompt_text, temperature=0, interaction_txt=self.chat_log, phase="api_review")
 
     def template_reference_prompt(self):
         """ select which code reference to reference """
@@ -326,7 +326,7 @@ class Agent:
             )
 
             code_reference_question = code_reference_question.replace("TASK_STRING_TEMPLATE", str(self.new_task))
-            res = generate_feedback(code_reference_question, temperature=0., interaction_txt=self.chat_log)
+            res = generate_feedback(code_reference_question, temperature=0., interaction_txt=self.chat_log, phase="code_reference")
             if self.is_unisis_scene:
                 # Reuse ordinary task code only as an API/style reference;
                 # generated UniSis code is separately constrained to the
@@ -376,11 +376,16 @@ class Agent:
             code_prompt_text = code_prompt_text.replace("TASK_STRING_TEMPLATE", str(self.new_task))
 
         res = generate_feedback(
-                code_prompt_text, temperature=0, interaction_txt=self.chat_log)
+                code_prompt_text, temperature=0, interaction_txt=self.chat_log, phase="code_generation")
         if self.is_unisis_scene:
+            from gensim.llm import set_run_phase
+            set_run_phase("code_parsing")
             code, task_name = self._extract_unisis_code(res)
-            save_text(self.model_output_dir, f'{self.new_task["task-name"]}_code_output', code)
-            print("Save code to:", self.model_output_dir, self.new_task["task-name"] + "_code_output")
+            set_run_phase("code_saving")
+            code_path = Path(self.model_output_dir).parent / "code/task.py"
+            code_path.parent.mkdir(parents=True, exist_ok=True)
+            code_path.write_text(code, encoding="utf-8")
+            print("Save code to:", code_path)
             return code, task_name
         code, task_name = extract_code(res)
         print("Save code to:", self.model_output_dir, task_name + "_code_output")

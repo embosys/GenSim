@@ -46,6 +46,9 @@ class Memory:
 
     def save_run(self, new_task):
         """save chat history and potentially save base memory"""
+        if str(self.cfg.get("scene_source", "original")).lower() == "unisis":
+            save_text(self.cfg['model_output_dir'], "full_interaction", "".join(self.chat_log))
+            return
         print("save all interaction to :", f'{new_task["task-name"]}_full_output')
         unroll_chatlog = ''
         for chat in self.chat_log:

@@ -9,6 +9,9 @@ unisis:
   scene_path: null # YAML file or directory containing scene.yaml; required when scene_source=unisis
   end_effector: suction # scene robot end effector supported by the environment
   cache_dir: null # optional asset-conversion cache directory
+  seed: 123 # base seed; each trial/attempt adds its index
+  output_dir: null # defaults to <scene directory>/gensim
+  run_id: null # optional directory name; multi-trial runs append _t001, etc.
 max_env_run_cnt: 3 # maximum number of runs for each environment
 trials: 10 # how many times of spawning each environment generated
 output_folder: 'output/output_stats'
