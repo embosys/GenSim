@@ -153,3 +153,6 @@ cliport/environments/assets_backup
 demo*.log
 outputs
 multirun
+
+# Local agent instructions
+/AGENTS.md
