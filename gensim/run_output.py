@@ -90,6 +90,12 @@ class RunOutput:
                      "load_memory": bool(cfg["load_memory"]), "use_template": bool(cfg["use_template"]),
                      "max_env_run_cnt": int(cfg["max_env_run_cnt"]),
                      "save_data": bool(cfg["save_data"]), "save_video": bool(cfg["record"]["save_video"])}
+        for env_name, meta_name in (("MANIGEN_BATCH_HASH", "batch_hash"),
+                                    ("MANIGEN_BATCH_RUN_ID", "batch_run_id"),
+                                    ("MANIGEN_BATCH_NAME", "batch_name")):
+            value = os.environ.get(env_name)
+            if value:
+                self.meta[meta_name] = value
         try:
             self.meta["source_commit"] = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1],

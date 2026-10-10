@@ -277,6 +277,9 @@ def _run(args: argparse.Namespace) -> Path:
                 "time_step_seconds": time_step,
             },
         }
+        for key in ("batch_hash", "batch_run_id", "batch_name"):
+            if key in run_meta:
+                manifest[key] = run_meta[key]
         _write_json(replay_dir / "manifest.json", manifest)
         print(f"Saved replay state: {replay_dir}")
         return replay_dir
