@@ -49,6 +49,8 @@ their YAML conventions. MJCF is compiled with MuJoCo and exported as an articula
 URDF; this supports the supplied Franka model. Source assets are never rewritten.
 Conversion products are cached under `.cache/unisis` by default; use
 `--cache-dir` to override this. Each cache entry includes `conversion.json`.
+Concurrent processes share per-asset POSIX locks while validating or publishing
+converted entries, so identical mesh/MJCF assets are converted once at a time.
 
 ## Limits
 

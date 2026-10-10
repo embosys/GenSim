@@ -10,6 +10,7 @@ dynamics as an exact replacement for the source format.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ import re
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -286,6 +288,19 @@ def _new_cache_dir(cache_dir: Path, key: str) -> tuple[Path, Path]:
     return cache_dir / key, Path(tempfile.mkdtemp(prefix=f".{key}.", dir=cache_dir))
 
 
+@contextmanager
+def _cache_lock(cache_dir: Path, key: str):
+    """Serialize validation and publication for one content-addressed asset."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Keep lock files in place: unlinking one could let waiters lock different inodes.
+    with (cache_dir / f".{key}.lock").open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def prepare_mesh_asset(
     source_path: Path, cache_dir: Path, *, file_meshes_are_zup: bool | None = None
 ) -> Path:
@@ -313,31 +328,32 @@ def prepare_mesh_asset(
     )
     key = f"unisis-mesh-{digest[:24]}"
     output_name = f"{_safe_name(source_path.stem)}.obj"
-    final_dir = cache_dir / key
-    if _cache_complete(final_dir, output_name):
-        return final_dir / output_name
+    with _cache_lock(cache_dir, key):
+        final_dir = cache_dir / key
+        if _cache_complete(final_dir, output_name):
+            return final_dir / output_name
 
-    final_dir, temp_dir = _new_cache_dir(cache_dir, key)
-    try:
-        output_path = temp_dir / output_name
-        details = _write_combined_obj(source_path, output_path, is_mesh_zup=is_mesh_zup)
-        _write_report(
-            temp_dir,
-            {
-                "kind": "glb_to_obj",
-                "source": str(source_path),
-                "source_sha256": _sha256_file(source_path),
-                "converter_version": _CONVERTER_VERSION,
-                **details,
-            },
-        )
-        if final_dir.exists():
-            shutil.rmtree(final_dir)
-        os.replace(temp_dir, final_dir)
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    return final_dir / output_name
+        final_dir, temp_dir = _new_cache_dir(cache_dir, key)
+        try:
+            output_path = temp_dir / output_name
+            details = _write_combined_obj(source_path, output_path, is_mesh_zup=is_mesh_zup)
+            _write_report(
+                temp_dir,
+                {
+                    "kind": "glb_to_obj",
+                    "source": str(source_path),
+                    "source_sha256": _sha256_file(source_path),
+                    "converter_version": _CONVERTER_VERSION,
+                    **details,
+                },
+            )
+            if final_dir.exists():
+                shutil.rmtree(final_dir)
+            os.replace(temp_dir, final_dir)
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+        return final_dir / output_name
 
 
 def _mjcf_dependencies(source_path: Path) -> list[Path]:
@@ -766,25 +782,26 @@ def prepare_mjcf_asset(source_path: Path, cache_dir: Path) -> Path:
     digest = _digest_files(dependencies, _CONVERTER_VERSION + ":mjcf")
     key = f"unisis-mjcf-{digest[:24]}"
     output_name = f"{_safe_name(source_path.stem)}.urdf"
-    final_dir = cache_dir / key
-    if _cache_complete(final_dir, output_name):
-        return final_dir / output_name
+    with _cache_lock(cache_dir, key):
+        final_dir = cache_dir / key
+        if _cache_complete(final_dir, output_name):
+            return final_dir / output_name
 
-    final_dir, temp_dir = _new_cache_dir(cache_dir, key)
-    try:
-        output = temp_dir / output_name
-        details = _export_mjcf(source_path, output)
-        _write_report(
-            temp_dir,
-            {
-                **details,
-                "source_sha256": _digest_files(dependencies, "mjcf-source"),
-            },
-        )
-        if final_dir.exists():
-            shutil.rmtree(final_dir)
-        os.replace(temp_dir, final_dir)
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    return final_dir / output_name
+        final_dir, temp_dir = _new_cache_dir(cache_dir, key)
+        try:
+            output = temp_dir / output_name
+            details = _export_mjcf(source_path, output)
+            _write_report(
+                temp_dir,
+                {
+                    **details,
+                    "source_sha256": _digest_files(dependencies, "mjcf-source"),
+                },
+            )
+            if final_dir.exists():
+                shutil.rmtree(final_dir)
+            os.replace(temp_dir, final_dir)
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+        return final_dir / output_name
