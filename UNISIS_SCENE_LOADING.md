@@ -113,3 +113,9 @@ This is an execution adaptation of GenSim. The native reward and saved rollout
 are useful for debugging; a shared UniSis/ManiGen experiment success checker is
 not yet integrated. LLM code generation is open-loop: simulation failures are
 recorded, not automatically sent back to the model for repair.
+
+Fixed-scene runs save their effective simulator configuration to the task's
+`artifacts/config.yaml`. The ManiGen batch runner disables Hydra's repository-root
+configuration files and file log; its stage log and the scene-local `run.log`
+retain console output. Generated code, LLM turns, trajectories and statistics
+remain under the individual task directory.

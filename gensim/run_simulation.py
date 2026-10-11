@@ -66,6 +66,7 @@ def run_unisis(cfg):
         with capture_console(output.path / "run.log"):
             try:
                 print("Run directory:", output.path)
+                OmegaConf.save(trial_cfg, output.path / "artifacts/config.yaml")
                 output.phase = "configuration"
                 configure_llm()
                 output.meta["llm"] = get_llm_metadata()
